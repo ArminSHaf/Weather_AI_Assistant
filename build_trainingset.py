@@ -1,46 +1,58 @@
+import joblib
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from sklearn.preprocessing import StandardScaler
 
 source_csv = "weather_romania_38_cities_2021_2025.csv"
 output_csv = "training_6h_dataset.csv"
 
 Past_hours = 24
-future_Horizon = [1, 2, 3, 4, 5, 6]  # times that the model is going to predict
+future_Horizon = 6  # length of times that the model is going to predict
 
 TIME_COL = "time"
 CITY_COL = "city_id"
-WMO_COL = "weather_code"
 
-BASE_FEATURES = [
+STEP_FEATURES = [
     "temperature_2m",
     "relative_humidity_2m",
     "surface_pressure",
     "wind_speed_10m",
     "wind_direction_10m",
     "precipitation",
-    "cloud_cover",
-    "weather_code",
+    "cloud_cover"
+]  # dynamic and changes everytime
+
+STATIC_FEATURES = [
     "latitude",
     "longitude",
-    "elevation",
+    "elevation"
+]  # static features remain the same
+
+TARGET_FEATURES = [
+    "temperature_2m",
+    "precipitation",
+    "wind_speed_10m",
+    "weather_code",
 ]
 
+CHUNK_SIZE = 10000  # controls RAM usage
 
-def map_wmo_to_condition(wmo: int) -> int:
-    if wmo in [0, 1, 2, 3]:
-        return 0
-    if 40 <= wmo <= 49:
-        return 1  # fog
-    if 51 <= wmo <= 67:
-        return 2  # rain
-    if 80 <= wmo <= 82:
-        return 2  # rain
-    if (71 <= wmo <= 77) or wmo in [85, 86]:
-        return 3  # snow / ice
-    if 95 <= wmo <= 99:
-        return 4  # thunderstorm
-    return 0
+
+# def map_wmo_to_condition(wmo: int) -> int:
+#     if wmo in [0, 1, 2, 3]:
+#         return 0
+#     if 40 <= wmo <= 49:
+#         return 1  # fog
+#     if 51 <= wmo <= 67:
+#         return 2  # rain
+#     if 80 <= wmo <= 82:
+#         return 2  # rain
+#     if (71 <= wmo <= 77) or wmo in [85, 86]:
+#         return 3  # snow / ice
+#     if 95 <= wmo <= 99:
+#         return 4  # thunderstorm
+#     return 0
 
 
 print("Loading CSV...")
@@ -52,78 +64,73 @@ df[TIME_COL] = pd.to_datetime(df[TIME_COL])
 df = df.sort_values([CITY_COL, TIME_COL]).reset_index(drop=True)
 # sort first by city then time - already have but garanteed.
 
+df["hour"] = df[TIME_COL].dt.hour
+df["dow"] = df[TIME_COL].dt.dayofyear
 
-first_chunk = True
+
+df["hour_sin"] = np.sin(2 * np.pi * df["hour"]/24)
+df["hour_cos"] = np.cos(2 * np.pi * df["hour"]/24)
+
+df["dow_sin"] = np.sin(2 * np.pi * df["dow"]/365)
+df["dow_cos"] = np.cos(2 * np.pi * df["dow"]/365)
+
+TIME_FEATURES = ["hour_sin", "hour_cos", "dow_sin", "dow_cos"]
+
+# verrrrry important for LSTM WE MUST USE SCALER TO SCALE ALL THE FEATURES
+
+scaler = StandardScaler()
+SCALE_COLS = STEP_FEATURES + STATIC_FEATURES
+df[SCALE_COLS] = scaler.fit_transform(df[SCALE_COLS])
+joblib.dump(scaler, "scaler.pkl")
+
+# ONLY FOR NOT CRASHING SPLITING INTO CHUNKS
+x_buffer, y_buffer = [], []
+chunk_id = 0
+
+
+def save_chunk(x_buf, y_buf, chunk_id):
+    x_arr = np.stack(x_buf).astype(np.float32)
+    y_arr = np.stack(y_buf).astype(np.float32)
+    np.save(f"X_train_part_{chunk_id}.npy", x_arr)
+    np.save(f"y_train_part_{chunk_id}.npy", y_arr)
+    print(f"Saved chunk {chunk_id}")
+
 
 for city_id, city_df in df.groupby(CITY_COL):
-    city_df = city_df.sort_values(TIME_COL).reset_index(drop=True)
+    city_df = city_df.reset_index(drop=True)
 
     n = len(city_df)
 
-    min_idx = Past_hours  # enough past data
-    max_idx = n - max(future_Horizon) - 1  # enough future data
-
-    if max_idx <= min_idx:
-        print(f"  Not enough data for city {city_id}, skipping")
-        continue
-
-    rows = []
-
     # sampling
-    for i in tqdm(range(min_idx, max_idx+1), desc=f"city {city_id}", leave=False):
-        sample = {}
-        # time stamp
+    for i in tqdm(range(Past_hours, n-future_Horizon), desc=f"city {city_id}", leave=False):
 
-        for lag in range(1, Past_hours+1):
-            row_lag = city_df.iloc[i - lag]
-            for feature in BASE_FEATURES:
-                sample[f"{feature}_lag_{lag}h"] = row_lag[feature]
+        past = city_df.iloc[i - Past_hours: i]
 
-        current_row = city_df.iloc[i]
+        step_mat = past[STEP_FEATURES].values
+        time_mat = past[TIME_FEATURES].values
 
-        sample["city_id"] = city_id
-        sample["time"] = current_row[TIME_COL]
-        sample["hour"] = current_row[TIME_COL].hour
-        sample["dayofweek"] = current_row[TIME_COL].dayofweek
-        sample["month"] = current_row[TIME_COL].month
+        static_vals = city_df.iloc[i][STATIC_FEATURES].values
+        static_mat = np.repeat(static_vals[None, :], Past_hours, axis=0)
+        # repeat it for 24 times  (24, 3) the same since static but must match the other datas
 
-        # y targets
-        for h in future_Horizon:
-            future_row = city_df.iloc[i+h]
+        X_seq = np.concatenate([step_mat, time_mat, static_mat], axis=1)
 
-            sample[f"target_wind_speed_h{h}"] = future_row["wind_speed_10m"]
-            sample[f"target_temperature_h{h}"] = future_row["temperature_2m"]
-            sample[f"target_precipitation_h{h}"] = future_row["precipitation"]
+        future = city_df.iloc[i:i + future_Horizon][TARGET_FEATURES].values
 
-            wmo_val = future_row[WMO_COL]
-            if pd.isna(wmo_val):  # had some Wmo code missing 52 rows
-                sample = None
-                break
+        if np.any(pd.isna(future)):
+            continue
 
-            wmo_code = int(wmo_val)
-            sample[f"target_wmo_class_h{h}"] = map_wmo_to_condition(wmo_code)
-        if sample is not None:
-            rows.append(sample)
+        x_buffer.append(X_seq)
+        y_buffer.append(future)
 
-    city_training_df = pd.DataFrame(rows)
+        if len(x_buffer) >= CHUNK_SIZE:
+            save_chunk(x_buffer, y_buffer, chunk_id)
+            x_buffer.clear()
+            y_buffer.clear()
+            chunk_id += 1
 
-    meta_cols = ["city_id", "time", "hour", "dayofweek", "month"]
-    target_cols = sorted(
-        [c for c in city_training_df.columns if c.startswith("target_")])
-    exclude = set(target_cols + ["city_id", "time"])
-    feature_cols = [c for c in city_training_df.columns if c not in exclude]
 
-    city_training_df = city_training_df[meta_cols + feature_cols + target_cols]
-
-    if first_chunk:
-        city_training_df.to_csv(output_csv, index=False, mode="w")
-        first_chunk = False
-    else:
-        city_training_df.to_csv(output_csv, index=False,
-                                mode="a", header=False)
-
-    # free memory
-    del rows
-    del city_training_df
+if x_buffer:
+    save_chunk(x_buffer, y_buffer, chunk_id)
 
 print("done!")
