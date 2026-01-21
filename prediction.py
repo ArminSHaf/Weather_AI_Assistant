@@ -200,6 +200,10 @@ def predict_weather(city: str) -> dict:
     except Exception as e:
         return {"status": "error", "message": f"Preprocessing error: {e}"}
 
+    print(f"\n--- Last Hour Data for {city} ({last_ts}) ---")
+    print(f"Temperature: {last_raw['temp']} °C")
+    print(f"Wind Speed:  {last_raw['wind']} km/h")
+
     print("Predicting...")
     preds = model.predict(X_input, verbose=0)
 
@@ -235,6 +239,11 @@ def predict_weather(city: str) -> dict:
             "condition": cond
         })
 
+    print(f"\n--- Prediction Results (Next {FUTURE_HORIZON} Hours) ---")
+    for item in forecast_data:
+        print(f"Hour +{item['hour']}: {item['condition']:<15} | Temp: {item['temp_c']:>5.1f}°C | Wind: {item['wind_kmh']:>5.1f} km/h | Precip: {item['precip_mm']:>4.2f} mm")
+    print("------------------------------------------\n")
+
     return {
         "status": "success",
         "city_name": city,
@@ -244,3 +253,13 @@ def predict_weather(city: str) -> dict:
         },
         "forecast": forecast_data
     }
+
+
+if __name__ == "__main__":
+    import sys
+    # Use Bucharest as default if no arg provided
+    city = "Bucharest"
+    if len(sys.argv) > 1:
+        city = sys.argv[1]
+    
+    predict_weather(city)
