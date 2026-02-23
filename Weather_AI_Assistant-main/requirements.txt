@@ -9,3 +9,4 @@ python-dotenv
 google-adk
 SpeechRecognition
 gTTS
+pyserial
